@@ -7,6 +7,9 @@ namespace Boson\Bridge\Symfony\DependencyInjection;
 use Boson\Application;
 use Boson\ApplicationCreateInfo;
 use Boson\Bridge\Symfony\Http\SymfonyHttpAdapter;
+use Boson\Component\Compiler\Command\CompileCommand;
+use Boson\Component\Compiler\Command\InitCommand;
+use Boson\Component\Compiler\Command\PackCommand;
 use Boson\Component\GlobalsProvider\CompoundServerGlobalsProvider;
 use Boson\Component\GlobalsProvider\DefaultServerGlobalsProvider;
 use Boson\Component\GlobalsProvider\ServerGlobalsProviderInterface;
@@ -21,6 +24,7 @@ use Boson\Component\Http\Static\Mime\MimeTypeDetectorInterface;
 use Boson\Component\Http\Static\StaticProviderInterface;
 use Boson\WebView\WebViewCreateInfo;
 use Boson\Window\WindowCreateInfo;
+use Boson\Window\WindowDecoration;
 use Symfony\Component\DependencyInjection\Argument\TaggedIteratorArgument;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Extension\Extension;
@@ -49,10 +53,48 @@ final class BosonExtension extends Extension
         $configs = $this->processConfiguration(new BosonConfiguration(), $configs);
 
         $this->registerSymfonyHttpServices($container);
-        $this->registerSymfonyStaticServices($container);
+        $this->registerSymfonyStaticServices($configs, $container);
         $this->registerApplicationServices($configs, $container);
 
         $this->registerParameters($configs, $container);
+
+        $this->shareServices($container);
+
+        $this->registerConsoleCommands($container);
+    }
+
+    private function registerConsoleCommands(ContainerBuilder $container): void
+    {
+        if (\class_exists(InitCommand::class)) {
+            $container->register(InitCommand::class, InitCommand::class)
+                ->setArgument('$name', 'boson:init')
+                ->addTag('console.command');
+        }
+
+        if (\class_exists(CompileCommand::class)) {
+            $container->register(CompileCommand::class, CompileCommand::class)
+                ->setArgument('$name', 'boson:compile')
+                ->addTag('console.command');
+        }
+
+        if (\class_exists(PackCommand::class)) {
+            $container->register(PackCommand::class, PackCommand::class)
+                ->setArgument('$name', 'boson:pack')
+                ->addTag('console.command');
+        }
+    }
+
+    private function shareServices(ContainerBuilder $container): void
+    {
+        if ($container->hasDefinition(StaticProviderInterface::class)) {
+            $container->getDefinition(StaticProviderInterface::class)
+                ->setPublic(true);
+        }
+
+        if ($container->hasAlias(StaticProviderInterface::class)) {
+            $container->getAlias(StaticProviderInterface::class)
+                ->setPublic(true);
+        }
     }
 
     /**
@@ -60,7 +102,7 @@ final class BosonExtension extends Extension
      */
     private function registerParameters(array $config, ContainerBuilder $container): void
     {
-        $container->setParameter('boson.entrypoint', $config['entrypoint']);
+        $container->setParameter('boson.entrypoint', $config['window']['entrypoint']);
     }
 
     private function registerMimeDetectorServices(ContainerBuilder $container): void
@@ -72,14 +114,21 @@ final class BosonExtension extends Extension
         $container->setAlias(MimeTypeDetectorInterface::class, ExtensionMimeTypeDetector::class);
     }
 
-    private function registerSymfonyStaticServices(ContainerBuilder $container): void
+    /**
+     * @param BosonConfigType $config
+     */
+    private function registerSymfonyStaticServices(array $config, ContainerBuilder $container): void
     {
         $this->registerMimeDetectorServices($container);
 
         $container->register(FilesystemStaticProvider::class, FilesystemStaticProvider::class)
-            ->setArgument('$root', ['%kernel.project_dir%/public'])
+            ->setArgument('$root', $config['static']['directory'] ?? [])
             ->setArgument('$mimeTypeDetector', new Reference(MimeTypeDetectorInterface::class))
             ->setAutowired(true);
+
+        if ($container->has(StaticProviderInterface::class)) {
+            return;
+        }
 
         $container->setAlias(StaticProviderInterface::class, FilesystemStaticProvider::class);
     }
@@ -104,18 +153,34 @@ final class BosonExtension extends Extension
     private function registerApplicationConfigServices(array $config, ContainerBuilder $container): void
     {
         $container->register(WebViewCreateInfo::class, WebViewCreateInfo::class)
+            ->setArgument('$storage', $config['window']['storage'])
+            ->setArgument('$flags', $config['window']['flags'])
+            ->setArgument('$contextMenu', $config['window']['enable_context_menu'])
+            ->setArgument('$devTools', $config['window']['enable_dev_tools'])
             ->setAutowired(true);
 
         $container->register(WindowCreateInfo::class, WindowCreateInfo::class)
             ->setArgument('$title', $config['name'])
-            ->setArgument('$width', $config['width'])
-            ->setArgument('$height', $config['height'])
+            ->setArgument('$width', $config['window']['width'])
+            ->setArgument('$height', $config['window']['height'])
+            ->setArgument('$visible', $config['window']['is_visible'])
+            ->setArgument('$resizable', $config['window']['is_resizable'])
+            ->setArgument('$alwaysOnTop', $config['window']['is_always_on_top'])
+            ->setArgument('$clickThrough', $config['window']['is_click_through'])
+            ->setArgument('$decoration', match ($config['window']['decorations']) {
+                'dark_mode' => WindowDecoration::DarkMode,
+                'frameless' => WindowDecoration::Frameless,
+                'transparent' => WindowDecoration::Transparent,
+                default => WindowDecoration::Default,
+            })
             ->setAutowired(true);
 
         $container->register(ApplicationCreateInfo::class, ApplicationCreateInfo::class)
             ->setArgument('$name', $config['name'])
             ->setArgument('$schemes', $config['schemes'])
-            ->setArgument('$debug', $config['debug'])
+            ->setArgument('$debug', $config['is_debug'])
+            ->setArgument('$quitOnClose', $config['is_quit_on_close'])
+            ->setArgument('$autorun', false)
             ->setAutowired(true);
     }
 
@@ -145,6 +210,10 @@ final class BosonExtension extends Extension
             ->setArgument('$decoders', new TaggedIteratorArgument('boson.http.body_decoder'))
             ->setAutowired(true);
 
+        if ($container->has(BodyDecoderInterface::class)) {
+            return;
+        }
+
         $container->setAlias(BodyDecoderInterface::class, BodyDecoderFactory::class);
     }
 
@@ -161,6 +230,10 @@ final class BosonExtension extends Extension
         $container->register(CompoundServerGlobalsProvider::class, CompoundServerGlobalsProvider::class)
             ->setArgument('$providers', new TaggedIteratorArgument('boson.globals.server'))
             ->setAutowired(true);
+
+        if ($container->has(ServerGlobalsProviderInterface::class)) {
+            return;
+        }
 
         $container->setAlias(ServerGlobalsProviderInterface::class, CompoundServerGlobalsProvider::class);
     }
